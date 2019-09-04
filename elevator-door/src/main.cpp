@@ -1,5 +1,5 @@
-//#define FRONT_DOOR 1
-#define REAR_DOOR 1
+#define FRONT_DOOR 1
+//#define REAR_DOOR 1
 
 #include "Arduino.h"
 
@@ -7,6 +7,11 @@
 #include <ESP8266mDNS.h> // For network discovery
 #include <WiFiUdp.h> // OSC over UDP
 #include <ArduinoOTA.h> // Updates over the air
+
+// WiFi Manager
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h> 
 
 // OSC
 #include <OSCMessage.h> // for sending OSC messages
@@ -38,8 +43,6 @@ const char* ESP_NAME = "elev-rear-door";
 const char* DOOR_NAME = "rear";
 #endif
 
-const char* WIFI_SSID = "skutta-net"; // network SSID (name)
-const char* WIFI_PASSWORD = "#######"; // network password
 const unsigned int OSC_PORT = 53000;
 
 const int CLOSED_POSITION = 0;
@@ -63,8 +66,13 @@ const int SENSOR2_ADDRESS = 42;
 const unsigned long OSC_MESSAGE_SEND_INTERVAL = 200; // 200 ms
 
 /* Variables */
+enum class CallState {None, Up, Down};
+static const char *CallStateString[] = {"none", "up", "down"};
+CallState callState = CallState::None;
+CallState lastCallState = CallState::None;
+
 enum class DoorState {Unknown, Calibrating, Closed, Closing, Manual, Open, Opening, Reopening, Waiting};
-static const char *DoorStateString[] = {"Unknown", "Calibrating", "Closed", "Closing", "Manual", "Open", "Opening", "Reopening", "Waiting"};
+static const char *DoorStateString[] = {"unknown", "calibrating", "closed", "closing", "manual", "open", "opening", "reopening", "waiting"};
 DoorState doorState = DoorState::Unknown;
 DoorState lastDoorState = DoorState::Unknown;
 
@@ -88,9 +96,9 @@ char hostname[21] = {0};
 WiFiUDP Udp;
 OSCErrorCode error;
 
-String controllerHostname;
-IPAddress controllerIp;
-unsigned int controllerPort;
+String qLabHostName;
+IPAddress qLabIp;
+unsigned int qLabPort;
 
 /* TIC */
 TicSerial tic(Serial);
@@ -304,25 +312,25 @@ void openDoor(bool reopen) {
   doorState = (reopen == true) ? DoorState::Reopening : DoorState::Opening;
 }
 
-void receiveCallUp(OSCMessage &msg, int addrOffset){
+void callUp(){
+  callState = CallState::Up;
   mcp.digitalWrite(3, HIGH); // UP
   mcp.digitalWrite(1, LOW); // Down
 }
 
-void receiveCallDown(OSCMessage &msg, int addrOffset){
+void callDown(){
+  callState = CallState::Down;
   mcp.digitalWrite(3, LOW); // UP
   mcp.digitalWrite(1, HIGH); // Down
 }
 
-void receiveCallNone(OSCMessage &msg, int addrOffset){
+void callNone(){
+  callState = CallState::None;
   mcp.digitalWrite(3, LOW); // UP
   mcp.digitalWrite(1, LOW); // Down
 }
 
 void receiveDoorOpen(OSCMessage &msg, int addrOffset){
-  // Clear call acceptance lights
-  mcp.digitalWrite(3, LOW); // UP
-  mcp.digitalWrite(1, LOW); // Down
   doorOpenReceived = true;
 }
 
@@ -338,9 +346,6 @@ void receiveOSC(){
       oled.print(F("recv: "));
       oled.println(buffer);
       
-      msg.route("/call/up",receiveCallUp);
-      msg.route("/call/down",receiveCallDown);
-      msg.route("/call/none",receiveCallNone);
       msg.route("/door/open",receiveDoorOpen);
     } else {
       error = msg.getError();
@@ -350,23 +355,36 @@ void receiveOSC(){
   }
 }
 
-void sendControllerOSCMessage(const char* address) {
+void sendQLabOSCMessage(const char* address) {
   oled.print(F("send: "));
   oled.println(address);
 
   OSCMessage msg(address);
-  Udp.beginPacket(controllerIp, controllerPort);
+  Udp.beginPacket(qLabIp, qLabPort);
+  msg.send(Udp);
+  Udp.endPacket();
+  msg.empty();
+
+  // Send message three times to ensure delivery.  Need to come up with a better approach.
+  delay(100);
+
+  Udp.beginPacket(qLabIp, qLabPort);
+  msg.send(Udp);
+  Udp.endPacket();
+  msg.empty();
+
+  delay(100);
+
+  Udp.beginPacket(qLabIp, qLabPort);
   msg.send(Udp);
   Udp.endPacket();
   msg.empty();
 }
 
-void sendCallUp() {
-  sendControllerOSCMessage("/call/up");
-}
-
-void sendCallDown() {
-  sendControllerOSCMessage("/call/down");
+void configModeCallback (WiFiManager *myWiFiManager) {
+  oled.println(F("Config Mode"));
+  oled.println(WiFi.softAPIP());
+  oled.println(myWiFiManager->getConfigPortalSSID());
 }
 
 void setup() {
@@ -389,32 +407,25 @@ void setup() {
   
   /* WiFi */
   sprintf(hostname, "%s-%06X", ESP_NAME, ESP.getChipId());
-  oled.print(F("WiFi: "));
-  oled.println(WIFI_SSID);
-  
-  WiFi.mode(WIFI_STA);
-  WiFi.hostname(hostname);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    oled.println(F("Connection Failed!"));
-    delay(5000);
-    ESP.restart();
+  WiFiManager wifiManager;
+  wifiManager.setAPCallback(configModeCallback);
+  if(!wifiManager.autoConnect(hostname)) {
+    oled.println("WiFi Connect Failed");
+    //reset and try again, or maybe put it to deep sleep
+    ESP.reset();
+    delay(1000);
   }
-  //while (WiFi.status() != WL_CONNECTED)
-  //{
-  //  delay(500);
-  //  // Serial.print(".");
-  //}
-  // Serial.println();
 
   /* UDP */
   Udp.begin(OSC_PORT);
 
-  oled.println(WiFi.macAddress());
   oled.println(hostname);
+  oled.print(F("  "));
   oled.print(WiFi.localIP());
   oled.print(F(":"));
   oled.println(Udp.localPort());
+  oled.print(F("  "));
+  oled.println(WiFi.macAddress());
 
   /* OTA */
   ArduinoOTA.setHostname(hostname);
@@ -458,20 +469,23 @@ void setup() {
   // Wait to view display
   delay(2000);
   
-  // Discover Elevator Controller
-  while (MDNS.queryService("elev-ctrl", "udp") == 0) {
-    oled.println(F("find elev-ctrl"));
+  // Discover qLab
+  int queryCount = 0;
+  while (MDNS.queryService("qlab", "udp") == 0) {
+    oled.printf("find qlab: %u\r", queryCount);
     ArduinoOTA.handle();
     delay(1000);
+    queryCount++;
   }
-  controllerHostname = MDNS.hostname(0);
-  controllerIp = MDNS.IP(0);
-  controllerPort = MDNS.port(0);
+  qLabHostName = MDNS.hostname(0);
+  qLabIp = MDNS.IP(0);
+  qLabPort = MDNS.port(0);
 
-  oled.println(controllerHostname);
-  oled.print(controllerIp);
+  oled.println(qLabHostName);
+  oled.print(F("  "));
+  oled.print(qLabIp);
   oled.print(F(":"));
-  oled.println(controllerPort);
+  oled.println(qLabPort);
   
   /* TIC */
   // Set the TIC product
@@ -562,17 +576,8 @@ void loop() {
   ArduinoOTA.handle();
   receiveOSC();
 
-  // Read buttons
-  if (mcp.digitalRead(0) == LOW) { // Down Button
-    sendCallDown(); // Send immediately, do not use timer loop
-  }
-  if (mcp.digitalRead(2) == LOW) { // Up Button
-    sendCallUp(); // Send immediately, do not use timer loop
-  }
-  
   // Get range and position info
   int range = getRange();
-  int rangePosition = getRangePosition(range);
   int encoderPosition = getEncoderPosition();
   int currentPosition = tic.getCurrentPosition();
   int targetPosition = tic.getTargetPosition();
@@ -638,7 +643,21 @@ void loop() {
     }
   }
   else if (doorState == DoorState::Closed) {
+
+#ifdef FRONT_DOOR
+    // Read buttons if doors closed
+    if (mcp.digitalRead(0) == LOW) { // Down Button
+      callDown();
+    }
+    if (mcp.digitalRead(2) == LOW) { // Up Button
+      callUp();
+    }
+#endif
+
     if (openDoorRequested) {
+#ifdef FRONT_DOOR
+      callNone();
+#endif
 #ifdef REAR_DOOR
       mcp.digitalWrite(6, LOW); // Turn on EL wire
       mcp.digitalWrite(7, LOW); // Turn on EL wire
@@ -646,34 +665,31 @@ void loop() {
       openDoor(false);
     }
   }
-
-  // Send door state once every [interval].  This adds reliability.
-  if (millis() > oscSendTime) {
-    if (doorState == DoorState::Closed) {
-#ifdef FRONT_DOOR
-      sendControllerOSCMessage("/door/closed/front");
-#endif
-#ifdef REAR_DOOR
-      sendControllerOSCMessage("/door/closed/rear");
-#endif
-    } else {
-#ifdef FRONT_DOOR
-      sendControllerOSCMessage("/door/open/front");
-#endif
-#ifdef REAR_DOOR
-      sendControllerOSCMessage("/door/open/rear");
-#endif
-    }
-    oscSendTime = millis() + OSC_MESSAGE_SEND_INTERVAL;
-  }
   
+  // Print the call state
+  if (callState != lastCallState) {
+    oled.print(F("call: "));
+    oled.println(CallStateString[(int)callState]);
+
+    char callStateMessage[50]; 
+    sprintf(callStateMessage,"/cue/elevator.call.%s/start", CallStateString[(int)callState]);
+    sendQLabOSCMessage(callStateMessage);
+
+    lastCallState = callState;
+  }
+
   // Print the door state
   if (doorState != lastDoorState) {
     oled.print(F("door: "));
     oled.println(DoorStateString[(int)doorState]);
+
+    char doorStateMessage[50]; 
+    sprintf(doorStateMessage,"/cue/elevator.%s.%s/start", DOOR_NAME, DoorStateString[(int)doorState]);
+    sendQLabOSCMessage(doorStateMessage);
+
+    lastDoorState = doorState;
   }
 
-  lastDoorState = doorState;
   lastEncoderPosition = encoderPosition;
   tic.resetCommandTimeout();
 }
