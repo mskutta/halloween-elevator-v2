@@ -1,7 +1,13 @@
-#define FRONT_DOOR 1
+//#define FRONT_DOOR 1
 //#define REAR_DOOR 1
 
-#include "Arduino.h"
+#ifdef ESP8266 || ESP32
+#define ISR_PREFIX ICACHE_RAM_ATTR
+#else
+#define ISR_PREFIX
+#endif
+
+#include <Arduino.h>
 
 #include <ESP8266WiFi.h> // WIFI support
 #include <ESP8266mDNS.h> // For network discovery
@@ -253,7 +259,7 @@ void calibrate() {
   waitDoor(DOOR_DWELL_1);
 }
 
-void ai0() {
+ISR_PREFIX void ai0() {
   // ai0 is activated if DigitalPin nr 2 is going from LOW to HIGH
   // Check pin 3 to determine the direction
   if (digitalRead(D6)==LOW) {
