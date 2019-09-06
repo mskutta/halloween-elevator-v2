@@ -77,11 +77,13 @@ static const char *CallStateString[] = {"none", "up", "down"};
 CallState callState = CallState::None;
 CallState lastCallState = CallState::None;
 
-enum class DoorState {Unknown, Calibrating, Closed, Closing, Manual, Open, Opening, Reopening, Waiting};
-static const char *DoorStateString[] = {"unknown", "calibrating", "closed", "closing", "manual", "open", "opening", "reopening", "waiting"};
+enum class DoorState {Unknown, Calibrating, Close, Closed, Closing, Open, Opening, Reopen, Reopening, Waiting};
+static const char *DoorStateString[] = {"unknown", "calibrating", "close", "closed", "closing", "open", "opening", "reopen", "reopening", "waiting"};
 DoorState doorState = DoorState::Unknown;
 DoorState lastDoorState = DoorState::Unknown;
 
+unsigned long calibrateTimeout = 0;
+unsigned long closeTimeout = 0;
 unsigned long openTimeout = 0;
 unsigned long waitTimeout = 0;
 
@@ -191,6 +193,32 @@ void waitDoor(unsigned long timeout) {
   waitTimeout = millis() + timeout;
 }
 
+void setHighAccuracy() {
+  // High Accuracy
+  sensor1.setMeasurementTimingBudget(HIGH_ACCURACY_TIMING_BUDGET);
+  sensor2.setMeasurementTimingBudget(HIGH_ACCURACY_TIMING_BUDGET);
+  sensor3.setMeasurementTimingBudget(HIGH_ACCURACY_TIMING_BUDGET);
+}
+
+void setHighSpeed() {
+  // High Speed
+  sensor1.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
+  sensor2.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
+  sensor3.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
+}
+
+void preCalibrate() {
+  doorState = DoorState::Calibrating;
+  setHighAccuracy();
+  calibrateTimeout = millis() + 500; // Wait 500ms
+}
+
+void calibrate2(int range) {
+  int rangePosition = getRangePosition(range);
+  setEncoderPosition(rangePosition);
+  setHighSpeed();
+}
+
 void calibrate() {
   
   oled.println(F("Calibrating..."));
@@ -198,9 +226,7 @@ void calibrate() {
   doorState = DoorState::Calibrating;
   
   // High Accuracy
-  sensor1.setMeasurementTimingBudget(HIGH_ACCURACY_TIMING_BUDGET);
-  sensor2.setMeasurementTimingBudget(HIGH_ACCURACY_TIMING_BUDGET);
-  sensor3.setMeasurementTimingBudget(HIGH_ACCURACY_TIMING_BUDGET);
+  setHighAccuracy();
   
   // Give the Tic some time to start up.
   delay(500);
@@ -251,9 +277,7 @@ void calibrate() {
   tic.deenergize();
   
   // High Speed
-  sensor1.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
-  sensor2.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
-  sensor3.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
+  setHighSpeed();
   
   // Wait for door to timeout then close
   waitDoor(DOOR_DWELL_1);
@@ -269,13 +293,17 @@ ISR_PREFIX void ai0() {
   }
 }
 
-void closeDoor() {
+void preCloseDoor() {
   // Allow the door to settle
   if (tic.getEnergized()) {
     tic.deenergize();
-    delay(250);
+    closeTimeout = millis() + 250; // Wait 250ms
   }
   
+  doorState = DoorState::Close;
+}
+
+void closeDoor() {
   tic.energize();
   tic.setStepMode(TicStepMode::Microstep8);
   tic.setCurrentLimit(900); // 750 is the minimum required to mostly open the door
@@ -289,13 +317,16 @@ void closeDoor() {
   doorState = DoorState::Closing;
 }
 
-void openDoor(bool reopen) {
-  // Allow the door to settle
+void preOpenDoor(bool reopen) {
   if (tic.getEnergized()) {
     tic.deenergize();
-    delay(250);
+    openTimeout = millis() + 250; // Wait 250ms
   }
-  
+
+  doorState = (reopen == true) ? DoorState::Reopen : DoorState::Open;
+}
+
+void openDoor(bool reopen) {
   tic.energize();
   tic.setStepMode(TicStepMode::Microstep8);
   tic.setCurrentLimit(1500);
@@ -372,19 +403,19 @@ void sendQLabOSCMessage(const char* address) {
   msg.empty();
 
   // Send message three times to ensure delivery.  Need to come up with a better approach.
-  delay(100);
+  // delay(100);
 
-  Udp.beginPacket(qLabIp, qLabPort);
-  msg.send(Udp);
-  Udp.endPacket();
-  msg.empty();
+  // Udp.beginPacket(qLabIp, qLabPort);
+  // msg.send(Udp);
+  // Udp.endPacket();
+  // msg.empty();
 
-  delay(100);
+  // delay(100);
 
-  Udp.beginPacket(qLabIp, qLabPort);
-  msg.send(Udp);
-  Udp.endPacket();
-  msg.empty();
+  // Udp.beginPacket(qLabIp, qLabPort);
+  // msg.send(Udp);
+  // Udp.endPacket();
+  // msg.empty();
 }
 
 void configModeCallback (WiFiManager *myWiFiManager) {
@@ -520,9 +551,7 @@ void setup() {
   sensor3.init();
   
   // High Speed
-  sensor1.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
-  sensor2.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
-  sensor3.setMeasurementTimingBudget(HIGH_SPEED_TIMING_BUDGET);
+  setHighSpeed();
   
   sensor1.setTimeout(500);
   sensor2.setTimeout(500);
@@ -540,6 +569,9 @@ void setup() {
   
   // Set up interrupts
   attachInterrupt(digitalPinToInterrupt(D5), ai0, RISING);
+
+  /* door switch */
+  pinMode(D7, INPUT_PULLUP);
 
   /* Port Expander (MCP23008) */
   mcp.begin(0); // 0x20
@@ -611,11 +643,21 @@ void loop() {
   // Handle Door States
   if (doorState == DoorState::Waiting) {
     if (millis() > waitTimeout) {
-      // Close the door
-      closeDoor();
+      preCalibrate();
     }
     else if (range == -1 || openDoorRequested || (encoderPosition != lastEncoderPosition)) {
       waitDoor(DOOR_DWELL_2);
+    }
+  }
+  else if (doorState == DoorState::Calibrating) {
+    if (millis() > calibrateTimeout && range != -1) {
+      calibrate2(range);
+      preCloseDoor();
+    }
+  }
+  else if (doorState == DoorState::Close) {
+    if (millis() > closeTimeout) {
+      closeDoor();
     }
   }
   else if (doorState == DoorState::Closing) {
@@ -625,10 +667,20 @@ void loop() {
     else if ((range == -1 && encoderPosition > 1000) || // beam break - reopen
               positionCorrection < -64 || // door is being pushed - reopen
               openDoorRequested) { // open door requested
-      openDoor(true);
+      preOpenDoor(true);
     }
     else if (positionCorrection > 64) { // door is being pulled - wait
       waitDoor(DOOR_DWELL_2);
+    }
+  }
+  else if (doorState == DoorState::Open || doorState == DoorState::Reopen) {
+    if (millis() > openTimeout) {
+      if (doorState == DoorState::Open) {
+        openDoor(false);
+      } 
+      else if (doorState == DoorState::Reopen) {
+        openDoor(true);
+      }
     }
   }
   else if (doorState == DoorState::Opening || doorState == DoorState::Reopening) {
@@ -668,7 +720,7 @@ void loop() {
       mcp.digitalWrite(6, LOW); // Turn on EL wire
       mcp.digitalWrite(7, LOW); // Turn on EL wire
 #endif
-      openDoor(false);
+      preOpenDoor(false);
     }
   }
   
