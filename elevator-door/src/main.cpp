@@ -397,25 +397,15 @@ void sendQLabOSCMessage(const char* address) {
   oled.println(address);
 
   OSCMessage msg(address);
-  Udp.beginPacket(qLabIp, qLabPort);
-  msg.send(Udp);
-  Udp.endPacket();
-  msg.empty();
 
-  // Send message three times to ensure delivery.  Need to come up with a better approach.
-  // delay(100);
-
-  // Udp.beginPacket(qLabIp, qLabPort);
-  // msg.send(Udp);
-  // Udp.endPacket();
-  // msg.empty();
-
-  // delay(100);
-
-  // Udp.beginPacket(qLabIp, qLabPort);
-  // msg.send(Udp);
-  // Udp.endPacket();
-  // msg.empty();
+  // Send message 10 times to ensure delivery.  Need to come up with a better approach. This should happen in main loop.
+  for (int x = 0; x < 10; x++) {
+    Udp.beginPacket(qLabIp, qLabPort);
+    msg.send(Udp);
+    Udp.endPacket();
+    msg.empty();
+    delay(5);
+  }
 }
 
 void configModeCallback (WiFiManager *myWiFiManager) {
@@ -639,6 +629,13 @@ void loop() {
   // Messages
   bool openDoorRequested = doorOpenReceived;
   doorOpenReceived = false;
+
+  // Test Button
+  if (digitalRead(D7)==LOW) {
+    oled.invertDisplay(true);
+  } else {
+    oled.invertDisplay(false);
+  }
   
   // Handle Door States
   if (doorState == DoorState::Waiting) {
